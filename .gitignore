@@ -1,0 +1,4 @@
+.env
+bot_settings.sqlite3
+__pycache__/
+*.py[cod]
