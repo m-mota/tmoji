@@ -243,7 +243,8 @@ class EmojiBot(commands.Bot):
 intents = discord.Intents.default()
 intents.guild_messages = True
 intents.typing = True
-bot = EmojiBot(command_prefix="!", intents=intents)
+proxy = os.getenv("HTTPS_PROXY") or os.getenv("https_proxy")
+bot = EmojiBot(command_prefix="!", intents=intents, proxy=proxy)
 
 
 @bot.event

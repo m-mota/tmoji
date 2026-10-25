@@ -28,6 +28,11 @@ Run the bot:
 python main.py
 ```
 
+If the host requires an HTTPS proxy to reach Discord, set `HTTPS_PROXY` (or
+`https_proxy`) to the proxy URL in the environment used to launch the bot. For
+systemd services or containers, configure it in the service or container
+environment; an interactive shell's environment may not be inherited.
+
 Slash commands are synced when the bot starts. Global command updates may take
 some time to appear in Discord.
 
