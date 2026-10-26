@@ -48,4 +48,8 @@ Admins can use these commands to manage the bot:
 - `/remove role:<role>` removes a role from the allowlist.
 - `/clear` removes every role from the allowlist.
 
-These admin commands require the **Administrator** permission. Settings are stored separately per server in `bot_settings.sqlite3`. If no settings have been saved for a server, the defaults are a 10-second timeout and expiry notices enabled. Non-admin users can use `/e` only if they are in the allowlist. With no roles configured, only administrators can use `/e`. The bot still requires the **Manage Emojis and Stickers** permission to create emojis. The database also tracks allowed roles and active emoji slots so the bot can clean up its temporary emojis when it restarts. The database is created automatically and is ignored by Git.
+These admin commands require the **Administrator** permission. Settings are stored separately per server in `bot_settings.sqlite3`. If no settings have been saved for a server, the defaults are a 10-second timeout and expiry notices enabled. By default, `@everyone` is allowed to use `/e`; administrators can change the allowlist with `/add`, `/remove`, and `/clear`. Clearing the allowlist leaves only administrators able to use `/e`. The bot still requires the **Manage Emojis and Stickers** permission to create emojis. The database also tracks allowed roles and active emoji slots so the bot can clean up its temporary emojis when it restarts. The database is created automatically and is ignored by Git.
+
+## Logs
+
+The bot writes INFO-level logs to the console for settings and allowed-role changes, temporary emoji creation/replacement/expiry, and startup cleanup. Log records include guild, user, role, and emoji IDs where relevant; image contents are never logged.

@@ -82,6 +82,19 @@ with sqlite3.connect(SETTINGS_DB) as connection:
         )
         """
     )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS allowed_role_settings (
+            guild_id INTEGER PRIMARY KEY
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO allowed_role_settings (guild_id)
+        SELECT DISTINCT guild_id FROM allowed_roles
+        """
+    )
 
 
 def get_guild_settings(guild_id: int) -> tuple[int, bool]:
@@ -123,6 +136,12 @@ def reset_guild_settings(guild_id: int) -> None:
 
 def get_allowed_role_ids(guild_id: int) -> set[int]:
     with sqlite3.connect(SETTINGS_DB) as connection:
+        configured = connection.execute(
+            "SELECT 1 FROM allowed_role_settings WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()
+        if configured is None:
+            return {guild_id}
         rows = connection.execute(
             "SELECT role_id FROM allowed_roles WHERE guild_id = ?",
             (guild_id,),
@@ -130,8 +149,21 @@ def get_allowed_role_ids(guild_id: int) -> set[int]:
     return {int(row[0]) for row in rows}
 
 
+def configure_allowed_roles(connection: sqlite3.Connection, guild_id: int) -> None:
+    cursor = connection.execute(
+        "INSERT OR IGNORE INTO allowed_role_settings (guild_id) VALUES (?)",
+        (guild_id,),
+    )
+    if cursor.rowcount:
+        connection.execute(
+            "INSERT OR IGNORE INTO allowed_roles (guild_id, role_id) VALUES (?, ?)",
+            (guild_id, guild_id),
+        )
+
+
 def add_allowed_role(guild_id: int, role_id: int) -> None:
     with sqlite3.connect(SETTINGS_DB) as connection:
+        configure_allowed_roles(connection, guild_id)
         connection.execute(
             "INSERT OR IGNORE INTO allowed_roles (guild_id, role_id) VALUES (?, ?)",
             (guild_id, role_id),
@@ -140,6 +172,7 @@ def add_allowed_role(guild_id: int, role_id: int) -> None:
 
 def remove_allowed_role(guild_id: int, role_id: int) -> bool:
     with sqlite3.connect(SETTINGS_DB) as connection:
+        configure_allowed_roles(connection, guild_id)
         cursor = connection.execute(
             "DELETE FROM allowed_roles WHERE guild_id = ? AND role_id = ?",
             (guild_id, role_id),
@@ -149,6 +182,10 @@ def remove_allowed_role(guild_id: int, role_id: int) -> bool:
 
 def clear_allowed_roles(guild_id: int) -> None:
     with sqlite3.connect(SETTINGS_DB) as connection:
+        connection.execute(
+            "INSERT OR IGNORE INTO allowed_role_settings (guild_id) VALUES (?)",
+            (guild_id,),
+        )
         connection.execute(
             "DELETE FROM allowed_roles WHERE guild_id = ?",
             (guild_id,),
@@ -270,12 +307,31 @@ async def clean_up_previous_sessions() -> None:
             emoji = await guild.fetch_emoji(emoji_id)
             await emoji.delete(reason="Cleaning up temporary emoji after bot restart")
         except discord.NotFound:
-            pass
+            logging.info(
+                "Temporary emoji %s was already missing during startup cleanup "
+                "(guild_id=%s, user_id=%s)",
+                emoji_id,
+                guild_id,
+                user_id,
+            )
         except discord.HTTPException:
-            logging.exception("Failed to clean up old temporary emoji %s", emoji_id)
+            logging.exception(
+                "Failed to clean up old temporary emoji %s "
+                "(guild_id=%s, user_id=%s)",
+                emoji_id,
+                guild_id,
+                user_id,
+            )
             continue
         recently_deleted_emoji_ids.add(emoji_id)
         delete_active_emoji(guild_id, user_id, emoji_id)
+        logging.info(
+            "Cleaned up temporary emoji %s after restart "
+            "(guild_id=%s, user_id=%s)",
+            emoji_id,
+            guild_id,
+            user_id,
+        )
 
 
 def is_administrator(interaction: discord.Interaction) -> bool:
@@ -308,6 +364,11 @@ async def settings(interaction: discord.Interaction) -> None:
 
     timeout, show_expiry = get_guild_settings(guild.id)
     allowed_role_ids = get_allowed_role_ids(guild.id)
+    logging.info(
+        "Settings viewed (guild_id=%s, user_id=%s)",
+        guild.id,
+        interaction.user.id,
+    )
     role_names = []
     for role_id in sorted(allowed_role_ids):
         role = guild.get_role(role_id)
@@ -371,6 +432,13 @@ async def set_settings(
         updated_timeout,
         updated_show_expiry,
     )
+    logging.info(
+        "Settings updated (guild_id=%s, user_id=%s, timeout=%s, show_expiry=%s)",
+        guild.id,
+        interaction.user.id,
+        updated_timeout,
+        updated_show_expiry,
+    )
     await interaction.response.send_message(
         f"settings saved!\n"
         f"**timeout:** {updated_timeout} seconds\n"
@@ -398,6 +466,11 @@ async def reset_settings(interaction: discord.Interaction) -> None:
         return
 
     reset_guild_settings(guild.id)
+    logging.info(
+        "Settings reset to defaults (guild_id=%s, user_id=%s)",
+        guild.id,
+        interaction.user.id,
+    )
     await interaction.response.send_message(
         f"settings reset to their defaults!\n"
         f"**timeout:** {DEFAULT_TIMEOUT} seconds\n"
@@ -429,6 +502,12 @@ async def add_allowed_role_command(
         return
 
     add_allowed_role(guild.id, role.id)
+    logging.info(
+        "Allowed role added (guild_id=%s, role_id=%s, user_id=%s)",
+        guild.id,
+        role.id,
+        interaction.user.id,
+    )
     await interaction.response.send_message(
         f"{role_mention(role)} can now use the emoji command!",
         ephemeral=True,
@@ -458,7 +537,16 @@ async def remove_allowed_role_command(
         )
         return
 
-    if remove_allowed_role(guild.id, role.id):
+    removed = remove_allowed_role(guild.id, role.id)
+    logging.info(
+        "Allowed role removal requested (guild_id=%s, role_id=%s, "
+        "user_id=%s, removed=%s)",
+        guild.id,
+        role.id,
+        interaction.user.id,
+        removed,
+    )
+    if removed:
         response = f"{role_mention(role)} can no longer use the emoji command!"
     else:
         response = f"{role_mention(role)} wasn't on the allowlist!"
@@ -487,6 +575,11 @@ async def clear_allowed_roles_command(interaction: discord.Interaction) -> None:
         return
 
     clear_allowed_roles(guild.id)
+    logging.info(
+        "Allowed roles cleared (guild_id=%s, user_id=%s)",
+        guild.id,
+        interaction.user.id,
+    )
     await interaction.response.send_message(
         "all allowed roles were removed, so only administrators can use the emoji command now!",
         ephemeral=True,
@@ -528,6 +621,7 @@ async def delete_temporary_emoji(
             await asyncio.gather(*pending, return_exceptions=True)
 
         if not done or message_task in done:
+            expiry_reason = "inactivity timeout" if not done else "user message"
             break
 
     key = (guild.id, user_id)
@@ -542,17 +636,34 @@ async def delete_temporary_emoji(
                 )
             )
         except discord.NotFound:
-            pass
+            logging.info(
+                "Temporary emoji %s was already missing at expiry "
+                "(guild_id=%s, user_id=%s)",
+                session.emoji.id,
+                guild.id,
+                user_id,
+            )
         except discord.HTTPException:
             logging.exception(
-                "Failed to delete temporary emoji `%s`",
+                "Failed to delete temporary emoji `%s` "
+                "(guild_id=%s, user_id=%s)",
                 session.emoji,
+                guild.id,
+                user_id,
             )
             return
 
         recently_deleted_emoji_ids.add(session.emoji.id)
         active_emojis.pop(key, None)
         delete_active_emoji(guild.id, user_id, session.emoji.id)
+        logging.info(
+            "Temporary emoji expired (guild_id=%s, user_id=%s, emoji_id=%s, "
+            "reason=%s)",
+            guild.id,
+            user_id,
+            session.emoji.id,
+            expiry_reason,
+        )
         if session.show_expiry:
             try:
                 await session.interaction.followup.send(
@@ -561,8 +672,11 @@ async def delete_temporary_emoji(
                 )
             except discord.HTTPException:
                 logging.exception(
-                    "Failed to send expiry notice for temporary emoji `%s`",
+                    "Failed to send expiry notice for temporary emoji `%s` "
+                    "(guild_id=%s, user_id=%s)",
                     session.emoji,
+                    guild.id,
+                    user_id,
                 )
 
 
@@ -619,7 +733,11 @@ async def set_emoji(
     try:
         image_data = await image.read()
     except discord.HTTPException:
-        logging.exception("Failed to read image attachment")
+        logging.exception(
+            "Failed to read image attachment (guild_id=%s, user_id=%s)",
+            guild.id,
+            interaction.user.id,
+        )
         await interaction.followup.send(
             "i couldn't read the attached image, please try again!",
             ephemeral=True,
@@ -644,11 +762,20 @@ async def set_emoji(
                     reason=f"updated by {interaction.user} with /e",
                 )
             except discord.NotFound:
-                pass
+                logging.info(
+                    "Previous temporary emoji %s was already missing during "
+                    "replacement (guild_id=%s, user_id=%s)",
+                    previous.emoji.id,
+                    guild.id,
+                    user_id,
+                )
             except discord.HTTPException:
                 logging.exception(
-                    "Failed to replace temporary emoji `%s`",
+                    "Failed to replace temporary emoji `%s` "
+                    "(guild_id=%s, user_id=%s)",
                     previous.emoji,
+                    guild.id,
+                    user_id,
                 )
                 previous.interaction = interaction
                 previous.timeout = timeout
@@ -663,6 +790,13 @@ async def set_emoji(
                 )
                 return
             recently_deleted_emoji_ids.add(previous.emoji.id)
+            logging.info(
+                "Temporary emoji replaced (guild_id=%s, user_id=%s, "
+                "previous_emoji_id=%s)",
+                guild.id,
+                user_id,
+                previous.emoji.id,
+            )
         else:
             active_rows = get_active_emoji_rows(guild.id)
             used_slots = {row[2] for row in active_rows}
@@ -683,7 +817,13 @@ async def set_emoji(
                 reason=f"added by {interaction.user} with {bot.user} via /e",
             )
         except discord.HTTPException:
-            logging.exception("Discord rejected the request to create an emoji")
+            logging.exception(
+                "Discord rejected the request to create an emoji "
+                "(guild_id=%s, user_id=%s, slot=%s)",
+                guild.id,
+                user_id,
+                slot,
+            )
             if previous is not None:
                 active_emojis.pop(key, None)
                 delete_active_emoji(guild.id, user_id, previous.emoji.id)
@@ -694,6 +834,14 @@ async def set_emoji(
             return
 
         save_active_emoji(guild.id, user_id, slot, emoji.id)
+        logging.info(
+            "Temporary emoji created (guild_id=%s, user_id=%s, emoji_id=%s, "
+            "slot=%s)",
+            guild.id,
+            user_id,
+            emoji.id,
+            slot,
+        )
         session = ActiveEmoji(
             guild=guild,
             interaction=interaction,
